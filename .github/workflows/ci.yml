@@ -1,0 +1,57 @@
+name: Laravel CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.5'
+          extensions: mbstring, intl, pdo_sqlite, pdo_mysql, bcmath, zip
+          tools: composer:v2
+          coverage: none
+      - run: composer validate --strict
+      - run: composer install --prefer-dist --no-interaction --no-progress
+      - run: cp .env.example .env && php artisan key:generate
+      - run: vendor/bin/pint --test
+      - run: php artisan test
+      - run: composer audit
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production image
+        run: docker build --tag laravel-coolify:test .
+      - name: Smoke test production container
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_key="base64:$(openssl rand -base64 32)"
+          docker run -d --name laravel-smoke -p 127.0.0.1:8080:80 \
+            -e APP_KEY="$app_key" -e APP_URL=http://localhost:8080 laravel-coolify:test
+          for attempt in {1..30}; do
+            if curl --fail --silent http://localhost:8080/up >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          curl --fail --silent http://localhost:8080/up >/dev/null
+          curl --fail --silent http://localhost:8080/ | grep -q 'Laravel 13'
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/.env)" = 404
+      - name: Container logs
+        if: always()
+        run: docker logs laravel-smoke || true
+      - name: Cleanup
+        if: always()
+        run: docker rm -f laravel-smoke || true
